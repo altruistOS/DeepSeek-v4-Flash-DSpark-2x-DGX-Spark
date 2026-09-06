@@ -52,6 +52,7 @@ py_files+=(
   scripts/test-issue26-swa-min-v2.py
   scripts/test-issue31-thinking-budget-gpu.py
   scripts/test-issue55-tool-truncation.py
+  scripts/test-responses-store-hotfix.py
   scripts/test-responses-api-live.py
   scripts/verify-issue138-responses-history-live.py
   scripts/test-issue138-responses-history-hotfix.py
@@ -72,6 +73,16 @@ py_files+=(
   scripts/test-dsv4-vision-exp-hotfix.py
   scripts/test-issue141-sparse-mla-decode-chunk.py
   scripts/test-issue136-xgrammar-termination.py
+  scripts/test-issue191-toolcall-failclosed.py
+  scripts/test-dspark-block-k.py
+  scripts/test-rope-swa-fix.py
+  scripts/test-dspark-swa-prefix.py
+  scripts/test-dsml-recovery.py
+  scripts/test-mxfp4-indexer-cache.py
+  scripts/test-c128a-prefill-cache.py
+  patches/hotfix-vllm-c128a-prefill-cache.py
+  scripts/test-issue144-effort-align.py
+  patches/hotfix-dsv4-issue144-effort-align.py
   scripts/test-issue117-shm-ring-buffer.py
   scripts/verify-issue136-xgrammar-live.py
   scripts/test-empty-encoder-output-hotfix.py
@@ -92,6 +103,8 @@ python3 scripts/test-issue31-thinking-budget-gpu.py -q
 ok "test-issue31-thinking-budget-gpu"
 python3 scripts/test-issue55-tool-truncation.py -q
 ok "test-issue55-tool-truncation"
+python3 scripts/test-responses-store-hotfix.py -q
+ok "test-responses-store-hotfix"
 python3 scripts/test-responses-api-live.py -q
 ok "test-responses-api-live"
 python3 scripts/test-issue138-responses-history-hotfix.py -q
@@ -130,6 +143,22 @@ python3 scripts/test-issue141-sparse-mla-decode-chunk.py -q
 ok "test-issue141-sparse-mla-decode-chunk"
 python3 scripts/test-issue136-xgrammar-termination.py -q
 ok "test-issue136-xgrammar-termination"
+python3 scripts/test-issue191-toolcall-failclosed.py -q
+ok "test-issue191-toolcall-failclosed"
+python3 scripts/test-dspark-block-k.py -q
+ok "test-dspark-block-k"
+python3 scripts/test-rope-swa-fix.py -q
+ok "test-rope-swa-fix"
+python3 scripts/test-dspark-swa-prefix.py -q
+ok "test-dspark-swa-prefix"
+python3 scripts/test-dsml-recovery.py -q
+ok "test-dsml-recovery"
+python3 scripts/test-mxfp4-indexer-cache.py -q
+ok "test-mxfp4-indexer-cache"
+python3 scripts/test-c128a-prefill-cache.py -q
+ok "test-c128a-prefill-cache"
+python3 scripts/test-issue144-effort-align.py -q
+ok "test-issue144-effort-align"
 python3 scripts/test-issue117-shm-ring-buffer.py -q
 ok "test-issue117-shm-ring-buffer"
 python3 scripts/test-empty-encoder-output-hotfix.py -q
@@ -332,6 +361,13 @@ if grep -Fq 'LIMIT_MM_ARGS=(--limit-mm-per-prompt "$${LIMIT_MM_JSON}")' docker-c
 else
   bad "compose must not pass bare image=8 to --limit-mm-per-prompt (JSON only)"
 fi
+# The env example must document image=N (bare JSON loses quotes when sourced).
+if grep -Fq '# LIMIT_MM_PER_PROMPT=image=' .env.dspark.example \
+  && ! grep -Fq '# LIMIT_MM_PER_PROMPT={"image":8}' .env.dspark.example; then
+  ok "env example documents LIMIT_MM_PER_PROMPT in image=N form"
+else
+  bad "env example must keep '# LIMIT_MM_PER_PROMPT=image=N' (bare JSON loses quotes when sourced)"
+fi
 # Assistant-final continuation (#52/PR53): default OFF (stock renderer);
 # ON must be an exactly-1 gate with a fail-closed invocation.
 if grep -Fq 'DSPARK_ENABLE_ASSISTANT_FINAL_HOTFIX: "${DSPARK_ENABLE_ASSISTANT_FINAL_HOTFIX:-0}"' docker-compose.dspark.yml \
@@ -389,6 +425,20 @@ if grep -Fq 'DSPARK_WORKER_HF_NFS="${DSPARK_WORKER_HF_NFS:-0}"' start-deepseek-v
 else
   bad "worker HF NFS wiring is incomplete"
 fi
+if grep -Fq 'hotfix-dsv4-responses-store.py}:/opt/hotfix-dsv4-responses-store.py:ro' docker-compose.dspark.yml \
+  && grep -Fq 'VLLM_ENABLE_RESPONSES_API_STORE: "${VLLM_ENABLE_RESPONSES_API_STORE:-0}"' docker-compose.dspark.yml \
+  && grep -Fq 'DSPARK_RESPONSES_STORE_MAX_ENTRIES: "${DSPARK_RESPONSES_STORE_MAX_ENTRIES:-256}"' docker-compose.dspark.yml \
+  && grep -Fq 'if [ "$${VLLM_ENABLE_RESPONSES_API_STORE:-0}" != "1" ]; then export VLLM_ENABLE_RESPONSES_API_STORE=0; fi;' docker-compose.dspark.yml \
+  && grep -Fq 'if [ "$${VLLM_ENABLE_RESPONSES_API_STORE}" = "1" ]; then python3 /opt/hotfix-dsv4-responses-store.py || exit 1; fi;' docker-compose.dspark.yml \
+  && grep -Fxq 'VLLM_ENABLE_RESPONSES_API_STORE=0' .env.dspark.example \
+  && grep -Fxq 'DSPARK_RESPONSES_STORE_MAX_ENTRIES=256' .env.dspark.example \
+  && grep -Fq '# Bounded Responses API store pre-flight (begin).' start-deepseek-v4-flash-dspark.sh \
+  && grep -Fq 'scp "$DSPARK_RESPONSES_STORE_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-dsv4-responses-store.py"' start-deepseek-v4-flash-dspark.sh \
+  && grep -Fq '/opt/hotfix-dsv4-responses-store.py --check' start-deepseek-v4-flash-dspark.sh; then
+  ok "Responses store is exact-1, fail-closed, source-checked, reported, and propagated to every rank"
+else
+  bad "bounded Responses store wiring is incomplete"
+fi
 if grep -q 'restart: ${DSPARK_RESTART_POLICY:-unless-stopped}' docker-compose.dspark.yml; then
   ok "compose restart unless-stopped"
 else
@@ -407,6 +457,7 @@ for p in \
   patches/hotfix-encoding-dsv4-issue21.py \
   patches/hotfix-dsv4-issue31-v2-thinking-budget-gpu.py \
   patches/hotfix-dsv4-issue55-tool-truncation.py \
+  patches/hotfix-dsv4-responses-store.py \
   patches/hotfix-dsv4-issue26-hybrid-swa-min.py \
   patches/hotfix-dsv4-issue27-partial-prefill-concurrency.py \
   patches/hotfix-dsv4-adaptive-prefill-chunk.py \
@@ -504,4 +555,106 @@ else
   bad "TP=3 optional path missing (compose TP_SIZE/NNODES, apply_tp3_patch, start-tp3.sh, or bootstrap ifaces)"
 fi
 
+# Issue #191 tool-call fail-closed contract: default OFF, exact-1/fail-closed,
+# async-scheduling knob defaults to 1 and is passed to the worker verbatim.
+if grep -Fq 'DSPARK_ENABLE_ISSUE191_TOOLCALL_FAILCLOSED: "${DSPARK_ENABLE_ISSUE191_TOOLCALL_FAILCLOSED:-0}"' docker-compose.dspark.yml \
+  && grep -Fq 'if [ "$${DSPARK_ENABLE_ISSUE191_TOOLCALL_FAILCLOSED:-0}" = "1" ]; then python3 /opt/hotfix-vllm-issue191-toolcall-failclosed.py || exit 1; fi;' docker-compose.dspark.yml \
+  && grep -Fq 'DSPARK_ASYNC_SCHEDULING: "${DSPARK_ASYNC_SCHEDULING:-1}"' docker-compose.dspark.yml \
+  && grep -Fq 'ASYNC_SCHEDULING_ARGS="--async-scheduling"' docker-compose.dspark.yml \
+  && ! grep -Fxq '        --async-scheduling' docker-compose.dspark.yml \
+  && grep -Fq "DSPARK_ISSUE191_TOOLCALL_HOTFIX='./patches/hotfix-vllm-issue191-toolcall-failclosed.py'" start-deepseek-v4-flash-dspark.sh \
+  && grep -Fq 'DSPARK_ASYNC_SCHEDULING=$REMOTE_ASYNC_SCHEDULING' start-deepseek-v4-flash-dspark.sh; then
+  ok "compose/launcher gate issue191 tool-call fail-closed hotfix and the async-scheduling knob"
+else
+  bad "issue191 hotfix must be default-off, fail-closed, worker-synced, and DSPARK_ASYNC_SCHEDULING must replace the bare --async-scheduling line"
+fi
+# Issue #191 thinking-off fallback knob (default 1, passed verbatim).
+if grep -Fq 'DSPARK_ISSUE191_TOOLCALL_THINKOFF_FALLBACK: "${DSPARK_ISSUE191_TOOLCALL_THINKOFF_FALLBACK:-1}"' docker-compose.dspark.yml \
+  && grep -Fq 'DSPARK_ISSUE191_TOOLCALL_THINKOFF_FALLBACK=$REMOTE_ISSUE191_THINKOFF' start-deepseek-v4-flash-dspark.sh \
+  && grep -Fq 'DSPARK_ISSUE191_TOOLCALL_THINKOFF_FALLBACK=1' .env.dspark.example; then
+  ok "compose/launcher gate the issue191 thinking-off fallback"
+else
+  bad "issue191 thinking-off fallback must default to 1 and be passed to the worker"
+fi
+# DSpark block-k unlock: default OFF, exact-1/fail-closed, worker-synced, preflight.
+if grep -Fq 'DSPARK_ENABLE_DSPARK_BLOCK_K: "${DSPARK_ENABLE_DSPARK_BLOCK_K:-0}"' docker-compose.dspark.yml \
+  && grep -Fq 'if [ "$${DSPARK_ENABLE_DSPARK_BLOCK_K:-0}" = "1" ]; then python3 /opt/hotfix-vllm-dspark-block-k.py || exit 1; fi;' docker-compose.dspark.yml \
+  && grep -Fq "DSPARK_DSPARK_BLOCK_K_HOTFIX='./patches/hotfix-vllm-dspark-block-k.py'" start-deepseek-v4-flash-dspark.sh \
+  && grep -Fq '/opt/hotfix-vllm-dspark-block-k.py --check' start-deepseek-v4-flash-dspark.sh \
+  && grep -Fq 'DSPARK_ENABLE_DSPARK_BLOCK_K=0' .env.dspark.example; then
+  ok "compose/launcher gate the DSpark block-k unlock"
+else
+  bad "block-k unlock must be default-off, fail-closed, worker-synced and preflighted"
+fi
+# RoPE SWA fix (vllm#54815): default OFF, exact-1/fail-closed, worker-synced, preflight.
+if grep -Fq 'DSPARK_ENABLE_ROPE_SWA_FIX: "${DSPARK_ENABLE_ROPE_SWA_FIX:-0}"' docker-compose.dspark.yml \
+  && grep -Fq 'if [ "$${DSPARK_ENABLE_ROPE_SWA_FIX:-0}" = "1" ]; then python3 /opt/hotfix-vllm-rope-swa-fix.py || exit 1; fi;' docker-compose.dspark.yml \
+  && grep -Fq "DSPARK_ROPE_SWA_FIX_HOTFIX='./patches/hotfix-vllm-rope-swa-fix.py'" start-deepseek-v4-flash-dspark.sh \
+  && grep -Fq '/opt/hotfix-vllm-rope-swa-fix.py --check' start-deepseek-v4-flash-dspark.sh \
+  && grep -Fq 'DSPARK_ENABLE_ROPE_SWA_FIX=0' .env.dspark.example; then
+  ok "compose/launcher gate the RoPE SWA fix"
+else
+  bad "rope-swa fix must be default-off, fail-closed, worker-synced and preflighted"
+fi
+# DSpark SWA prefix fix: default OFF, exact-1/fail-closed, worker-synced, preflight.
+if grep -Fq 'DSPARK_ENABLE_DSPARK_SWA_PREFIX: "${DSPARK_ENABLE_DSPARK_SWA_PREFIX:-0}"' docker-compose.dspark.yml \
+  && grep -Fq 'if [ "$${DSPARK_ENABLE_DSPARK_SWA_PREFIX:-0}" = "1" ]; then python3 /opt/hotfix-vllm-dspark-swa-prefix.py || exit 1; fi;' docker-compose.dspark.yml \
+  && grep -Fq "DSPARK_DSPARK_SWA_PREFIX_HOTFIX='./patches/hotfix-vllm-dspark-swa-prefix.py'" start-deepseek-v4-flash-dspark.sh \
+  && grep -Fq '/opt/hotfix-vllm-dspark-swa-prefix.py --check' start-deepseek-v4-flash-dspark.sh \
+  && grep -Fq 'DSPARK_ENABLE_DSPARK_SWA_PREFIX=0' .env.dspark.example; then
+  ok "compose/launcher gate the DSpark SWA prefix fix"
+else
+  bad "SWA prefix fix must be default-off, fail-closed, worker-synced and preflighted"
+fi
+# DSML recovery (vllm#52645): default OFF, identity-pinned/fail-closed, worker-synced, preflight.
+if grep -Fq 'DSPARK_ENABLE_DSML_RECOVERY: "${DSPARK_ENABLE_DSML_RECOVERY:-0}"' docker-compose.dspark.yml \
+  && grep -Fq 'if [ "$${DSPARK_ENABLE_DSML_RECOVERY:-0}" = "1" ]; then python3 /opt/hotfix-vllm-dsml-recovery.py || exit 1; fi;' docker-compose.dspark.yml \
+  && grep -Fq "DSPARK_DSML_RECOVERY_HOTFIX='./patches/hotfix-vllm-dsml-recovery.py'" start-deepseek-v4-flash-dspark.sh \
+  && grep -Fq '/opt/hotfix-vllm-dsml-recovery.py --check' start-deepseek-v4-flash-dspark.sh \
+  && grep -Fq 'DSPARK_ENABLE_DSML_RECOVERY=0' .env.dspark.example; then
+  ok "compose/launcher gate the DSML recovery"
+else
+  bad "DSML recovery must be default-off, fail-closed, worker-synced and preflighted"
+fi
+# MXFP4 indexer K cache (item8 §3): default OFF, exact-1/fail-closed, worker-synced, preflight, alias-coupled.
+if grep -Fq 'DSPARK_ENABLE_MXFP4_INDEXER_CACHE: "${DSPARK_ENABLE_MXFP4_INDEXER_CACHE:-0}"' docker-compose.dspark.yml \
+  && grep -Fq 'if [ "$${DSPARK_ENABLE_MXFP4_INDEXER_CACHE:-0}" = "1" ]; then python3 /opt/hotfix-vllm-mxfp4-indexer-cache.py || exit 1; fi;' docker-compose.dspark.yml \
+  && grep -Fq "DSPARK_MXFP4_INDEXER_CACHE_HOTFIX='./patches/hotfix-vllm-mxfp4-indexer-cache.py'" start-deepseek-v4-flash-dspark.sh \
+  && grep -Fq '/opt/hotfix-vllm-mxfp4-indexer-cache.py --check' start-deepseek-v4-flash-dspark.sh \
+  && grep -Fq 'requires DSPARK_ENABLE_DEEPGEMM_SM121_ALIAS=1' start-deepseek-v4-flash-dspark.sh \
+  && grep -Fq 'DSPARK_ENABLE_MXFP4_INDEXER_CACHE=0' .env.dspark.example; then
+  ok "compose/launcher gate the MXFP4 indexer K cache"
+else
+  bad "MXFP4 indexer cache must be default-off, fail-closed, worker-synced, preflighted and alias-coupled"
+fi
+# Issue #144 effort alignment: default OFF, exact-1/fail-closed, worker-synced, preflight.
+if grep -Fq 'DSPARK_ENABLE_ISSUE144_EFFORT_ALIGN: "${DSPARK_ENABLE_ISSUE144_EFFORT_ALIGN:-0}"' docker-compose.dspark.yml \
+  && grep -Fq 'if [ "$${DSPARK_ENABLE_ISSUE144_EFFORT_ALIGN:-0}" = "1" ]; then python3 /opt/hotfix-dsv4-issue144-effort-align.py || exit 1; fi;' docker-compose.dspark.yml \
+  && grep -Fq "DSPARK_ISSUE144_EFFORT_ALIGN_HOTFIX='./patches/hotfix-dsv4-issue144-effort-align.py'" start-deepseek-v4-flash-dspark.sh \
+  && grep -Fq '/opt/hotfix-dsv4-issue144-effort-align.py --check' start-deepseek-v4-flash-dspark.sh \
+  && grep -Fq 'DSPARK_ENABLE_ISSUE144_EFFORT_ALIGN=0' .env.dspark.example; then
+  ok "compose/launcher gate the issue #144 effort alignment"
+else
+  bad "issue #144 effort alignment must be default-off, fail-closed, worker-synced and preflighted"
+fi
+
+# Launcher remote_compose/remote_compose2 must each be defined exactly once and
+# carry the full feature passthrough set (a stacked-merge conflict once dropped
+# block-k from the TP2 worker and issue191/async from the TP3 worker2).
+for fn in remote_compose remote_compose2; do
+  body=$(awk "/^$fn\(\) \{/,/^}/" start-deepseek-v4-flash-dspark.sh)
+  if [ "$(grep -c "^$fn() {" start-deepseek-v4-flash-dspark.sh)" = 1 ] \
+    && grep -Fq 'DSPARK_ENABLE_ISSUE191_TOOLCALL_FAILCLOSED=$REMOTE_ISSUE191_ENABLE' <<<"$body" \
+    && grep -Fq 'DSPARK_ASYNC_SCHEDULING=$REMOTE_ASYNC_SCHEDULING' <<<"$body" \
+    && grep -Fq 'DSPARK_ENABLE_DSPARK_BLOCK_K=$REMOTE_DSPARK_BLOCK_K' <<<"$body" \
+    && grep -Fq 'DSPARK_ENABLE_ROPE_SWA_FIX=$REMOTE_ROPE_SWA_FIX' <<<"$body" \
+    && grep -Fq 'DSPARK_ENABLE_DSPARK_SWA_PREFIX=$REMOTE_DSPARK_SWA_PREFIX' <<<"$body" \
+    && grep -Fq 'DSPARK_ENABLE_DSML_RECOVERY=$REMOTE_DSML_RECOVERY' <<<"$body" \
+    && grep -Fq 'DSPARK_ENABLE_MXFP4_INDEXER_CACHE=$REMOTE_MXFP4_INDEXER' <<<"$body" \
+    && grep -Fq 'DSPARK_ENABLE_ISSUE144_EFFORT_ALIGN=$REMOTE_ISSUE144_EFFORT_ALIGN' <<<"$body"; then
+    ok "$fn carries the full passthrough set exactly once"
+  else
+    bad "$fn must be defined exactly once and carry issue191/async/block-k + rope-swa/swa-prefix/dsml-recovery/mxfp4-indexer/issue144 passthroughs"
+  fi
+done
 echo "CI validate passed (CPU recipe gates only)."

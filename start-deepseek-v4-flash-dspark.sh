@@ -152,8 +152,15 @@ case "$_mtp_k" in
     exit 2
     ;;
 esac
-if [ "$_mtp_k" -lt 5 ] || [ $((_mtp_k % 3)) -ne 0 ]; then
-  echo "error: Vision-Exp requires MTP_NUM_TOKENS >= 5 and divisible by 3 (num_nextn_predict_layers=3); got ${_mtp_k}" >&2
+if [ "${DSPARK_ENABLE_DSPARK_BLOCK_K:-0}" = "1" ]; then
+  # Block-k unlock: the stacked DSpark stages are not re-used per step, so k
+  # only has to be >= 1; the trained block is dspark_block_size (5).
+  if [ "$_mtp_k" -lt 1 ]; then
+    echo "error: MTP_NUM_TOKENS must be >= 1 with DSPARK_ENABLE_DSPARK_BLOCK_K=1; got ${_mtp_k}" >&2
+    exit 2
+  fi
+elif [ "$_mtp_k" -lt 5 ] || [ $((_mtp_k % 3)) -ne 0 ]; then
+  echo "error: Vision-Exp requires MTP_NUM_TOKENS >= 5 and divisible by 3 (num_nextn_predict_layers=3); got ${_mtp_k} (set DSPARK_ENABLE_DSPARK_BLOCK_K=1 to run k=dspark_block_size=5)" >&2
   exit 2
 fi
 unset _mtp_k
@@ -246,6 +253,33 @@ if { [ "$_dspark_keys_set" = "1" ] || [ -n "${VLLM_API_KEY:-}" ]; } && [ ! -f "$
   exit 1
 fi
 # DSPARK redaction pre-flight (end)
+# Bounded Responses API store pre-flight (begin).
+# The pinned vLLM store is changed only when its native feature is enabled.
+case "${VLLM_ENABLE_RESPONSES_API_STORE:-0}" in
+  1) VLLM_ENABLE_RESPONSES_API_STORE=1 ;;
+  *) VLLM_ENABLE_RESPONSES_API_STORE=0 ;;
+esac
+DSPARK_RESPONSES_STORE_HOTFIX="${DSPARK_RESPONSES_STORE_HOTFIX:-patches/hotfix-dsv4-responses-store.py}"
+case "$DSPARK_RESPONSES_STORE_HOTFIX" in
+  /*) ;;
+  *) DSPARK_RESPONSES_STORE_HOTFIX="$SCRIPT_DIR/$DSPARK_RESPONSES_STORE_HOTFIX" ;;
+esac
+if [ "$VLLM_ENABLE_RESPONSES_API_STORE" = "1" ]; then
+  if [ ! -f "$DSPARK_RESPONSES_STORE_HOTFIX" ]; then
+    echo "error: VLLM_ENABLE_RESPONSES_API_STORE=1 but patcher is missing: $DSPARK_RESPONSES_STORE_HOTFIX" >&2
+    exit 1
+  fi
+  DSPARK_RESPONSES_STORE_MAX_ENTRIES="${DSPARK_RESPONSES_STORE_MAX_ENTRIES:-256}"
+  if [[ ! "$DSPARK_RESPONSES_STORE_MAX_ENTRIES" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: DSPARK_RESPONSES_STORE_MAX_ENTRIES must be a positive integer" >&2
+    exit 2
+  fi
+else
+  DSPARK_RESPONSES_STORE_MAX_ENTRIES=256
+fi
+DSPARK_RESPONSES_STORE_REMOTE_ENV="VLLM_ENABLE_RESPONSES_API_STORE='$VLLM_ENABLE_RESPONSES_API_STORE' DSPARK_RESPONSES_STORE_MAX_ENTRIES='$DSPARK_RESPONSES_STORE_MAX_ENTRIES'"
+export VLLM_ENABLE_RESPONSES_API_STORE DSPARK_RESPONSES_STORE_MAX_ENTRIES DSPARK_RESPONSES_STORE_HOTFIX
+# Bounded Responses API store pre-flight (end).
 
 # Issue #138 Responses history compatibility pre-flight (begin).
 # Only the literal 1 enables it; normalize every other spelling to 0 before
@@ -345,6 +379,69 @@ if [ "${DSPARK_ENABLE_ISSUE136_XGRAMMAR_HOTFIX:-0}" = "1" ] && { [ ! -f "$DSPARK
   exit 1
 fi
 export DSPARK_ISSUE136_XGRAMMAR_HOTFIX DSPARK_ENABLE_ISSUE136_XGRAMMAR_HOTFIX
+DSPARK_ISSUE191_TOOLCALL_HOTFIX="${DSPARK_ISSUE191_TOOLCALL_HOTFIX:-$SCRIPT_DIR/patches/hotfix-vllm-issue191-toolcall-failclosed.py}"
+if [ "${DSPARK_ENABLE_ISSUE191_TOOLCALL_FAILCLOSED:-0}" = "1" ] && { [ ! -f "$DSPARK_ISSUE191_TOOLCALL_HOTFIX" ] || [ -L "$DSPARK_ISSUE191_TOOLCALL_HOTFIX" ]; }; then
+  echo "Issue #191 tool-call fail-closed hotfix is enabled but its local patcher is missing or not a regular file: $DSPARK_ISSUE191_TOOLCALL_HOTFIX" >&2
+  exit 1
+fi
+case "${DSPARK_ASYNC_SCHEDULING:-1}" in
+  0|1) ;;
+  *) echo "DSPARK_ASYNC_SCHEDULING must be 0 or 1 (got '${DSPARK_ASYNC_SCHEDULING:-}')" >&2; exit 1 ;;
+esac
+export DSPARK_ISSUE191_TOOLCALL_HOTFIX DSPARK_ENABLE_ISSUE191_TOOLCALL_FAILCLOSED DSPARK_ISSUE191_TOOLCALL_RETRIES DSPARK_ISSUE191_TOOLCALL_MODE DSPARK_ISSUE191_TOOLCALL_THINKOFF_FALLBACK DSPARK_ASYNC_SCHEDULING
+DSPARK_DSPARK_BLOCK_K_HOTFIX="${DSPARK_DSPARK_BLOCK_K_HOTFIX:-$SCRIPT_DIR/patches/hotfix-vllm-dspark-block-k.py}"
+if [ "${DSPARK_ENABLE_DSPARK_BLOCK_K:-0}" = "1" ] && { [ ! -f "$DSPARK_DSPARK_BLOCK_K_HOTFIX" ] || [ -L "$DSPARK_DSPARK_BLOCK_K_HOTFIX" ]; }; then
+  echo "DSpark block-k unlock is enabled but its local patcher is missing or not a regular file: $DSPARK_DSPARK_BLOCK_K_HOTFIX" >&2
+  exit 1
+fi
+export DSPARK_DSPARK_BLOCK_K_HOTFIX DSPARK_ENABLE_DSPARK_BLOCK_K
+DSPARK_ROPE_SWA_FIX_HOTFIX="${DSPARK_ROPE_SWA_FIX_HOTFIX:-$SCRIPT_DIR/patches/hotfix-vllm-rope-swa-fix.py}"
+if [ "${DSPARK_ENABLE_ROPE_SWA_FIX:-0}" = "1" ] && { [ ! -f "$DSPARK_ROPE_SWA_FIX_HOTFIX" ] || [ -L "$DSPARK_ROPE_SWA_FIX_HOTFIX" ]; }; then
+  echo "RoPE SWA fix is enabled but its local patcher is missing or not a regular file: $DSPARK_ROPE_SWA_FIX_HOTFIX" >&2
+  exit 1
+fi
+export DSPARK_ROPE_SWA_FIX_HOTFIX DSPARK_ENABLE_ROPE_SWA_FIX
+DSPARK_DSPARK_SWA_PREFIX_HOTFIX="${DSPARK_DSPARK_SWA_PREFIX_HOTFIX:-$SCRIPT_DIR/patches/hotfix-vllm-dspark-swa-prefix.py}"
+if [ "${DSPARK_ENABLE_DSPARK_SWA_PREFIX:-0}" = "1" ] && { [ ! -f "$DSPARK_DSPARK_SWA_PREFIX_HOTFIX" ] || [ -L "$DSPARK_DSPARK_SWA_PREFIX_HOTFIX" ]; }; then
+  echo "DSpark SWA prefix fix is enabled but its local patcher is missing or not a regular file: $DSPARK_DSPARK_SWA_PREFIX_HOTFIX" >&2
+  exit 1
+fi
+export DSPARK_DSPARK_SWA_PREFIX_HOTFIX DSPARK_ENABLE_DSPARK_SWA_PREFIX
+DSPARK_DSML_RECOVERY_HOTFIX="${DSPARK_DSML_RECOVERY_HOTFIX:-$SCRIPT_DIR/patches/hotfix-vllm-dsml-recovery.py}"
+if [ "${DSPARK_ENABLE_DSML_RECOVERY:-0}" = "1" ] && { [ ! -f "$DSPARK_DSML_RECOVERY_HOTFIX" ] || [ -L "$DSPARK_DSML_RECOVERY_HOTFIX" ]; }; then
+  echo "DSML recovery is enabled but its local patcher is missing or not a regular file: $DSPARK_DSML_RECOVERY_HOTFIX" >&2
+  exit 1
+fi
+export DSPARK_DSML_RECOVERY_HOTFIX DSPARK_ENABLE_DSML_RECOVERY
+DSPARK_ISSUE144_EFFORT_ALIGN_HOTFIX="${DSPARK_ISSUE144_EFFORT_ALIGN_HOTFIX:-$SCRIPT_DIR/patches/hotfix-dsv4-issue144-effort-align.py}"
+if [ "${DSPARK_ENABLE_ISSUE144_EFFORT_ALIGN:-0}" = "1" ] && { [ ! -f "$DSPARK_ISSUE144_EFFORT_ALIGN_HOTFIX" ] || [ -L "$DSPARK_ISSUE144_EFFORT_ALIGN_HOTFIX" ]; }; then
+  echo "Issue #144 effort alignment is enabled but its local patcher is missing or not a regular file: $DSPARK_ISSUE144_EFFORT_ALIGN_HOTFIX" >&2
+  exit 1
+fi
+export DSPARK_ISSUE144_EFFORT_ALIGN_HOTFIX DSPARK_ENABLE_ISSUE144_EFFORT_ALIGN
+# MXFP4 indexer K cache (opt-in, item8 design §3): gate relaxation + enablement arg.
+DSPARK_MXFP4_INDEXER_CACHE_HOTFIX="${DSPARK_MXFP4_INDEXER_CACHE_HOTFIX:-$SCRIPT_DIR/patches/hotfix-vllm-mxfp4-indexer-cache.py}"
+if [ "${DSPARK_ENABLE_MXFP4_INDEXER_CACHE:-0}" = "1" ] && { [ ! -f "$DSPARK_MXFP4_INDEXER_CACHE_HOTFIX" ] || [ -L "$DSPARK_MXFP4_INDEXER_CACHE_HOTFIX" ]; }; then
+  echo "MXFP4 indexer K cache is enabled but its local patcher is missing or not a regular file: $DSPARK_MXFP4_INDEXER_CACHE_HOTFIX" >&2
+  exit 1
+fi
+if [ "${DSPARK_ENABLE_MXFP4_INDEXER_CACHE:-0}" = "1" ] && [ "${DSPARK_ENABLE_DEEPGEMM_SM121_ALIAS:-0}" != "1" ]; then
+  echo "error: DSPARK_ENABLE_MXFP4_INDEXER_CACHE=1 requires DSPARK_ENABLE_DEEPGEMM_SM121_ALIAS=1 (the fp4 mqa-logits kernels are not in the persisted DeepGEMM JIT cache; the GB10 JIT compile needs the sm121 alias headers)" >&2
+  exit 1
+fi
+export DSPARK_MXFP4_INDEXER_CACHE_HOTFIX DSPARK_ENABLE_MXFP4_INDEXER_CACHE
+
+# C128A prefill conversion cache: same metadata lifetime, no persistent buffers.
+DSPARK_C128A_PREFILL_CACHE_HOTFIX="${DSPARK_C128A_PREFILL_CACHE_HOTFIX:-$SCRIPT_DIR/patches/hotfix-vllm-c128a-prefill-cache.py}"
+case "$DSPARK_C128A_PREFILL_CACHE_HOTFIX" in
+  /*) ;;
+  *) DSPARK_C128A_PREFILL_CACHE_HOTFIX="$SCRIPT_DIR/${DSPARK_C128A_PREFILL_CACHE_HOTFIX#./}" ;;
+esac
+if [ "${DSPARK_ENABLE_C128A_PREFILL_CACHE:-0}" = "1" ] && { [ ! -f "$DSPARK_C128A_PREFILL_CACHE_HOTFIX" ] || [ -L "$DSPARK_C128A_PREFILL_CACHE_HOTFIX" ]; }; then
+  echo "C128A prefill cache is enabled but its local patcher is missing or not a regular file: $DSPARK_C128A_PREFILL_CACHE_HOTFIX" >&2
+  exit 1
+fi
+export DSPARK_C128A_PREFILL_CACHE_HOTFIX DSPARK_ENABLE_C128A_PREFILL_CACHE
 
 : "${WORKER_HOST:?WORKER_HOST must be set in $ENV_FILE}"
 : "${MASTER_ADDR:?MASTER_ADDR must be set in $ENV_FILE}"
@@ -426,6 +523,18 @@ REMOTE_COMPOSE_FILE="$REMOTE_WORKER_DIR/docker-compose.dspark.yml"
 REMOTE_ENV_FILE="$REMOTE_WORKER_DIR/.env.dspark"
 REMOTE_VLLM_GB10_PATCH_DIR="$REMOTE_WORKER_DIR/vllm_patch_gb10"
 REMOTE_ISSUE136_ENABLE="$(printf '%q' "${DSPARK_ENABLE_ISSUE136_XGRAMMAR_HOTFIX:-0}")"
+REMOTE_ISSUE191_ENABLE="$(printf '%q' "${DSPARK_ENABLE_ISSUE191_TOOLCALL_FAILCLOSED:-0}")"
+REMOTE_ISSUE191_RETRIES="$(printf '%q' "${DSPARK_ISSUE191_TOOLCALL_RETRIES:-2}")"
+REMOTE_ISSUE191_MODE="$(printf '%q' "${DSPARK_ISSUE191_TOOLCALL_MODE:-failclosed}")"
+REMOTE_ISSUE191_THINKOFF="$(printf '%q' "${DSPARK_ISSUE191_TOOLCALL_THINKOFF_FALLBACK:-1}")"
+REMOTE_ASYNC_SCHEDULING="$(printf '%q' "${DSPARK_ASYNC_SCHEDULING:-1}")"
+REMOTE_DSPARK_BLOCK_K="$(printf '%q' "${DSPARK_ENABLE_DSPARK_BLOCK_K:-0}")"
+REMOTE_ROPE_SWA_FIX="$(printf '%q' "${DSPARK_ENABLE_ROPE_SWA_FIX:-0}")"
+REMOTE_DSPARK_SWA_PREFIX="$(printf '%q' "${DSPARK_ENABLE_DSPARK_SWA_PREFIX:-0}")"
+REMOTE_DSML_RECOVERY="$(printf '%q' "${DSPARK_ENABLE_DSML_RECOVERY:-0}")"
+REMOTE_ISSUE144_EFFORT_ALIGN="$(printf '%q' "${DSPARK_ENABLE_ISSUE144_EFFORT_ALIGN:-0}")"
+REMOTE_MXFP4_INDEXER="$(printf '%q' "${DSPARK_ENABLE_MXFP4_INDEXER_CACHE:-0}")"
+REMOTE_C128A_PREFILL_CACHE="$(printf '%q' "${DSPARK_ENABLE_C128A_PREFILL_CACHE:-0}")"
 REMOTE_COMPOSE="cd $REMOTE_WORKER_DIR && env -u MASTER_ADDR -u MASTER_PORT -u NODE_RANK -u HEADLESS COMPOSE_DISABLE_ENV_FILE=1"
 STARTUP_LOG_SINCE=""
 
@@ -914,11 +1023,11 @@ remote_nccl_env2() {
 remote_compose() {
   # The head may use an absolute local mount override; the worker always uses
   # the canonical synced relative path.
-  ssh "$WORKER_HOST" "$REMOTE_COMPOSE DSPARK_ENABLE_ISSUE136_XGRAMMAR_HOTFIX=$REMOTE_ISSUE136_ENABLE DSPARK_ISSUE136_XGRAMMAR_HOTFIX='./patches/hotfix-vllm-issue136-xgrammar-termination.py' TP_SIZE='$TP_SIZE' NNODES='$NNODES' TP3_PATCH_DIR='./patches/tp3' $(remote_nccl_env) $*"
+  ssh "$WORKER_HOST" "$REMOTE_COMPOSE DSPARK_ENABLE_C128A_PREFILL_CACHE=$REMOTE_C128A_PREFILL_CACHE DSPARK_C128A_PREFILL_CACHE_HOTFIX='./patches/hotfix-vllm-c128a-prefill-cache.py' DSPARK_ENABLE_ISSUE136_XGRAMMAR_HOTFIX=$REMOTE_ISSUE136_ENABLE DSPARK_ISSUE136_XGRAMMAR_HOTFIX='./patches/hotfix-vllm-issue136-xgrammar-termination.py' DSPARK_ENABLE_ISSUE191_TOOLCALL_FAILCLOSED=$REMOTE_ISSUE191_ENABLE DSPARK_ISSUE191_TOOLCALL_HOTFIX='./patches/hotfix-vllm-issue191-toolcall-failclosed.py' DSPARK_ISSUE191_TOOLCALL_RETRIES=$REMOTE_ISSUE191_RETRIES DSPARK_ISSUE191_TOOLCALL_MODE=$REMOTE_ISSUE191_MODE DSPARK_ISSUE191_TOOLCALL_THINKOFF_FALLBACK=$REMOTE_ISSUE191_THINKOFF DSPARK_ASYNC_SCHEDULING=$REMOTE_ASYNC_SCHEDULING DSPARK_ENABLE_DSPARK_BLOCK_K=$REMOTE_DSPARK_BLOCK_K DSPARK_DSPARK_BLOCK_K_HOTFIX='./patches/hotfix-vllm-dspark-block-k.py' DSPARK_ENABLE_ROPE_SWA_FIX=$REMOTE_ROPE_SWA_FIX DSPARK_ROPE_SWA_FIX_HOTFIX='./patches/hotfix-vllm-rope-swa-fix.py' DSPARK_ENABLE_DSPARK_SWA_PREFIX=$REMOTE_DSPARK_SWA_PREFIX DSPARK_DSPARK_SWA_PREFIX_HOTFIX='./patches/hotfix-vllm-dspark-swa-prefix.py' DSPARK_ENABLE_DSML_RECOVERY=$REMOTE_DSML_RECOVERY DSPARK_DSML_RECOVERY_HOTFIX='./patches/hotfix-vllm-dsml-recovery.py' DSPARK_ENABLE_MXFP4_INDEXER_CACHE=$REMOTE_MXFP4_INDEXER DSPARK_MXFP4_INDEXER_CACHE_HOTFIX='./patches/hotfix-vllm-mxfp4-indexer-cache.py' DSPARK_ENABLE_ISSUE144_EFFORT_ALIGN=$REMOTE_ISSUE144_EFFORT_ALIGN DSPARK_ISSUE144_EFFORT_ALIGN_HOTFIX='./patches/hotfix-dsv4-issue144-effort-align.py' TP_SIZE='$TP_SIZE' NNODES='$NNODES' TP3_PATCH_DIR='./patches/tp3' $(remote_nccl_env) $*"
 }
 
 remote_compose2() {
-  ssh "$WORKER2_HOST" "$REMOTE_COMPOSE2 DSPARK_ENABLE_ISSUE136_XGRAMMAR_HOTFIX=$REMOTE_ISSUE136_ENABLE DSPARK_ISSUE136_XGRAMMAR_HOTFIX='./patches/hotfix-vllm-issue136-xgrammar-termination.py' TP_SIZE='$TP_SIZE' NNODES='$NNODES' TP3_PATCH_DIR='./patches/tp3' $(remote_nccl_env2) $*"
+  ssh "$WORKER2_HOST" "$REMOTE_COMPOSE2 DSPARK_ENABLE_C128A_PREFILL_CACHE=$REMOTE_C128A_PREFILL_CACHE DSPARK_C128A_PREFILL_CACHE_HOTFIX='./patches/hotfix-vllm-c128a-prefill-cache.py' DSPARK_ENABLE_ISSUE136_XGRAMMAR_HOTFIX=$REMOTE_ISSUE136_ENABLE DSPARK_ISSUE136_XGRAMMAR_HOTFIX='./patches/hotfix-vllm-issue136-xgrammar-termination.py' DSPARK_ENABLE_ISSUE191_TOOLCALL_FAILCLOSED=$REMOTE_ISSUE191_ENABLE DSPARK_ISSUE191_TOOLCALL_HOTFIX='./patches/hotfix-vllm-issue191-toolcall-failclosed.py' DSPARK_ISSUE191_TOOLCALL_RETRIES=$REMOTE_ISSUE191_RETRIES DSPARK_ISSUE191_TOOLCALL_MODE=$REMOTE_ISSUE191_MODE DSPARK_ISSUE191_TOOLCALL_THINKOFF_FALLBACK=$REMOTE_ISSUE191_THINKOFF DSPARK_ASYNC_SCHEDULING=$REMOTE_ASYNC_SCHEDULING DSPARK_ENABLE_DSPARK_BLOCK_K=$REMOTE_DSPARK_BLOCK_K DSPARK_DSPARK_BLOCK_K_HOTFIX='./patches/hotfix-vllm-dspark-block-k.py' DSPARK_ENABLE_ROPE_SWA_FIX=$REMOTE_ROPE_SWA_FIX DSPARK_ROPE_SWA_FIX_HOTFIX='./patches/hotfix-vllm-rope-swa-fix.py' DSPARK_ENABLE_DSPARK_SWA_PREFIX=$REMOTE_DSPARK_SWA_PREFIX DSPARK_DSPARK_SWA_PREFIX_HOTFIX='./patches/hotfix-vllm-dspark-swa-prefix.py' DSPARK_ENABLE_DSML_RECOVERY=$REMOTE_DSML_RECOVERY DSPARK_DSML_RECOVERY_HOTFIX='./patches/hotfix-vllm-dsml-recovery.py' DSPARK_ENABLE_MXFP4_INDEXER_CACHE=$REMOTE_MXFP4_INDEXER DSPARK_MXFP4_INDEXER_CACHE_HOTFIX='./patches/hotfix-vllm-mxfp4-indexer-cache.py' DSPARK_ENABLE_ISSUE144_EFFORT_ALIGN=$REMOTE_ISSUE144_EFFORT_ALIGN DSPARK_ISSUE144_EFFORT_ALIGN_HOTFIX='./patches/hotfix-dsv4-issue144-effort-align.py' TP_SIZE='$TP_SIZE' NNODES='$NNODES' TP3_PATCH_DIR='./patches/tp3' $(remote_nccl_env2) $*"
 }
 
 log_since() {
@@ -991,9 +1100,21 @@ print_resolved_profile() {
   fi
   echo "  max batched tokens: ${MAX_NUM_BATCHED_TOKENS:-8192}"
   echo "  gpu memory utilization: ${GPU_MEMORY_UTILIZATION:-0.835} (from GPU_MEMORY_UTILIZATION_TEXT=${GPU_MEMORY_UTILIZATION_TEXT:-0.835})"
-  echo "  mtp speculative tokens: ${MTP_NUM_TOKENS:-6} (Vision-Exp: >=5 and divisible by 3)"
+  echo "  mtp speculative tokens: ${MTP_NUM_TOKENS:-6} (Vision-Exp: >=5 and divisible by 3 unless DSPARK_ENABLE_DSPARK_BLOCK_K=1)"
+  echo "  issue191 tool-call fail-closed hotfix: ${DSPARK_ENABLE_ISSUE191_TOOLCALL_FAILCLOSED:-0} (0=stock / 1=preflight+apply; mode=${DSPARK_ISSUE191_TOOLCALL_MODE:-failclosed} retries=${DSPARK_ISSUE191_TOOLCALL_RETRIES:-2} thinkoff-fallback=${DSPARK_ISSUE191_TOOLCALL_THINKOFF_FALLBACK:-1})"
+  echo "  async scheduling: ${DSPARK_ASYNC_SCHEDULING:-1} (1=--async-scheduling / 0=removed on both ranks)"
+  echo "  dspark block-k unlock: ${DSPARK_ENABLE_DSPARK_BLOCK_K:-0} (0=stock k%n_predict rule / 1=k follows dspark_block_size)"
+  echo "  rope swa fix (vllm#54815): ${DSPARK_ENABLE_ROPE_SWA_FIX:-0} (0=stock YaRN on sparse-SWA / 1=plain RoPE on sparse-SWA layers)"
+  echo "  dsml recovery (vllm#52645): ${DSPARK_ENABLE_DSML_RECOVERY:-0} (0=stock, malformed-wrapper invokes leak as content / 1=recover declared-tool DSML invokes)"
+  echo "  issue144 effort alignment: ${DSPARK_ENABLE_ISSUE144_EFFORT_ALIGN:-0} (0=stock front-inserted effort directive / 1=directive at system-region tail, cross-bucket prefix-cache sharing)"
+  echo "  mxfp4 indexer K cache (item8 §3): ${DSPARK_ENABLE_MXFP4_INDEXER_CACHE:-0} (0=stock fp8 indexer K / 1=MXFP4 indexer K, halved logits reads; requires sm121 alias headers)"
   echo "  default thinking: $DEFAULT_THINKING (off/low/high/max)"
   echo "  issue31 GPU thinking_token_budget hotfix: ${DSPARK_ENABLE_ISSUE31_GPU_HOTFIX:-0} (0=stock V2 / 1=apply)"
+  if [ "$VLLM_ENABLE_RESPONSES_API_STORE" = "1" ]; then
+    echo "  Responses API store: enabled (terminal cap $DSPARK_RESPONSES_STORE_MAX_ENTRIES)"
+  else
+    echo "  Responses API store: disabled (stock source)"
+  fi
   if [ "$DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT" = "1" ]; then
     echo "  issue138 Responses history compatibility: 1 (apply)"
   else
@@ -1077,10 +1198,10 @@ validate_compose() {
   echo "Validating head compose config..."
   compose_base 0 "" config --quiet
   echo "Validating worker compose config..."
-  remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' DSPARK_ENABLE_ISSUE141_SPARSE_MLA_CHUNK='$DSPARK_ISSUE141_EFFECTIVE' DSPARK_ISSUE141_HOTFIX='./patches/hotfix-dsv4-issue141-sparse-mla-decode-chunk.py' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT='$DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT' DSPARK_ISSUE138_HOTFIX='./patches/hotfix-vllm-issue138-responses-history.py' DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT='$DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT' DSPARK_CODEX_AGENT_MESSAGE_HOTFIX='./patches/hotfix-vllm-codex-agent-message.py' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES config --quiet"
+  remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV $DSPARK_RESPONSES_STORE_REMOTE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' DSPARK_ENABLE_ISSUE141_SPARSE_MLA_CHUNK='$DSPARK_ISSUE141_EFFECTIVE' DSPARK_ISSUE141_HOTFIX='./patches/hotfix-dsv4-issue141-sparse-mla-decode-chunk.py' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT='$DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT' DSPARK_ISSUE138_HOTFIX='./patches/hotfix-vllm-issue138-responses-history.py' DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT='$DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT' DSPARK_CODEX_AGENT_MESSAGE_HOTFIX='./patches/hotfix-vllm-codex-agent-message.py' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES config --quiet"
   if [ "$DSPARK_TP3" = "1" ]; then
     echo "Validating worker2 compose config..."
-    remote_compose2 "NODE_RANK=2 HEADLESS=1 $WORKER2_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER2_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' DSPARK_ENABLE_ISSUE141_SPARSE_MLA_CHUNK='$DSPARK_ISSUE141_EFFECTIVE' DSPARK_ISSUE141_HOTFIX='./patches/hotfix-dsv4-issue141-sparse-mla-decode-chunk.py' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT='$DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT' DSPARK_ISSUE138_HOTFIX='./patches/hotfix-vllm-issue138-responses-history.py' DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT='$DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT' DSPARK_CODEX_AGENT_MESSAGE_HOTFIX='./patches/hotfix-vllm-codex-agent-message.py' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER2_COMPOSE_FILES config --quiet"
+    remote_compose2 "NODE_RANK=2 HEADLESS=1 $WORKER2_HF_COMPOSE_ENV $DSPARK_RESPONSES_STORE_REMOTE_ENV VLLM_HOST_IP='$WORKER2_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' DSPARK_ENABLE_ISSUE141_SPARSE_MLA_CHUNK='$DSPARK_ISSUE141_EFFECTIVE' DSPARK_ISSUE141_HOTFIX='./patches/hotfix-dsv4-issue141-sparse-mla-decode-chunk.py' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT='$DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT' DSPARK_ISSUE138_HOTFIX='./patches/hotfix-vllm-issue138-responses-history.py' DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT='$DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT' DSPARK_CODEX_AGENT_MESSAGE_HOTFIX='./patches/hotfix-vllm-codex-agent-message.py' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER2_COMPOSE_FILES config --quiet"
   fi
 }
 
@@ -1278,6 +1399,11 @@ if [ -f "$DSPARK_ISSUE55_HOTFIX" ]; then
   ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
   scp "$DSPARK_ISSUE55_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-dsv4-issue55-tool-truncation.py"
 fi
+if [ -f "$DSPARK_RESPONSES_STORE_HOTFIX" ]; then
+  echo "Syncing bounded Responses store hotfix to ${WORKER_HOST}:${WORKER_DIR}/patches/"
+  ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
+  scp "$DSPARK_RESPONSES_STORE_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-dsv4-responses-store.py"
+fi
 DSPARK_EMPTY_ENCODER_OUTPUT_HOTFIX="${DSPARK_EMPTY_ENCODER_OUTPUT_HOTFIX:-$SCRIPT_DIR/patches/hotfix-vllm-empty-encoder-output.py}"
 if [ -f "$DSPARK_EMPTY_ENCODER_OUTPUT_HOTFIX" ]; then
   echo "Syncing Issue #109 empty-encoder-output hotfix to ${WORKER_HOST}:${WORKER_DIR}/patches/"
@@ -1377,6 +1503,46 @@ if [ -f "$DSPARK_ISSUE136_XGRAMMAR_HOTFIX" ] && [ ! -L "$DSPARK_ISSUE136_XGRAMMA
   ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
   scp "$DSPARK_ISSUE136_XGRAMMAR_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-vllm-issue136-xgrammar-termination.py"
 fi
+if [ -f "$DSPARK_ISSUE191_TOOLCALL_HOTFIX" ] && [ ! -L "$DSPARK_ISSUE191_TOOLCALL_HOTFIX" ]; then
+  echo "Syncing Issue #191 tool-call fail-closed hotfix to ${WORKER_HOST}:${WORKER_DIR}/patches/"
+  ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
+  scp "$DSPARK_ISSUE191_TOOLCALL_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-vllm-issue191-toolcall-failclosed.py"
+fi
+if [ -f "$DSPARK_DSPARK_BLOCK_K_HOTFIX" ] && [ ! -L "$DSPARK_DSPARK_BLOCK_K_HOTFIX" ]; then
+  echo "Syncing DSpark block-k unlock hotfix to ${WORKER_HOST}:${WORKER_DIR}/patches/"
+  ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
+  scp "$DSPARK_DSPARK_BLOCK_K_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-vllm-dspark-block-k.py"
+fi
+if [ -f "$DSPARK_ROPE_SWA_FIX_HOTFIX" ] && [ ! -L "$DSPARK_ROPE_SWA_FIX_HOTFIX" ]; then
+  echo "Syncing RoPE SWA fix hotfix to ${WORKER_HOST}:${WORKER_DIR}/patches/"
+  ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
+  scp "$DSPARK_ROPE_SWA_FIX_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-vllm-rope-swa-fix.py"
+fi
+if [ -f "$DSPARK_DSPARK_SWA_PREFIX_HOTFIX" ] && [ ! -L "$DSPARK_DSPARK_SWA_PREFIX_HOTFIX" ]; then
+  echo "Syncing DSpark SWA prefix hotfix to ${WORKER_HOST}:${WORKER_DIR}/patches/"
+  ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
+  scp "$DSPARK_DSPARK_SWA_PREFIX_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-vllm-dspark-swa-prefix.py"
+fi
+if [ -f "$DSPARK_DSML_RECOVERY_HOTFIX" ] && [ ! -L "$DSPARK_DSML_RECOVERY_HOTFIX" ]; then
+  echo "Syncing DSML recovery hotfix to ${WORKER_HOST}:${WORKER_DIR}/patches/"
+  ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
+  scp "$DSPARK_DSML_RECOVERY_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-vllm-dsml-recovery.py"
+fi
+if [ -f "$DSPARK_ISSUE144_EFFORT_ALIGN_HOTFIX" ] && [ ! -L "$DSPARK_ISSUE144_EFFORT_ALIGN_HOTFIX" ]; then
+  echo "Syncing Issue #144 effort alignment hotfix to ${WORKER_HOST}:${WORKER_DIR}/patches/"
+  ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
+  scp "$DSPARK_ISSUE144_EFFORT_ALIGN_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-dsv4-issue144-effort-align.py"
+fi
+if [ -f "$DSPARK_MXFP4_INDEXER_CACHE_HOTFIX" ] && [ ! -L "$DSPARK_MXFP4_INDEXER_CACHE_HOTFIX" ]; then
+  echo "Syncing MXFP4 indexer K cache hotfix to ${WORKER_HOST}:${WORKER_DIR}/patches/"
+  ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
+  scp "$DSPARK_MXFP4_INDEXER_CACHE_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-vllm-mxfp4-indexer-cache.py"
+fi
+if [ -f "$DSPARK_C128A_PREFILL_CACHE_HOTFIX" ] && [ ! -L "$DSPARK_C128A_PREFILL_CACHE_HOTFIX" ]; then
+  echo "Syncing C128A prefill cache hotfix to ${WORKER_HOST}:${WORKER_DIR}/patches/"
+  ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
+  scp "$DSPARK_C128A_PREFILL_CACHE_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-vllm-c128a-prefill-cache.py"
+fi
 # Compose always bind-mounts patches/tp3. Create it on the worker even for
 # TP=2 so Docker does not invent a root-owned empty dir (or fail the mount).
 ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches/tp3'"
@@ -1451,6 +1617,9 @@ if [ "$DSPARK_TP3" = "1" ]; then
     echo "FATAL: failed to sync patches/ to ${WORKER2_HOST} -- refusing to boot TP=3." >&2
     exit 1
   }
+  if [ -f "$DSPARK_C128A_PREFILL_CACHE_HOTFIX" ] && [ ! -L "$DSPARK_C128A_PREFILL_CACHE_HOTFIX" ]; then
+    scp "$DSPARK_C128A_PREFILL_CACHE_HOTFIX" "${WORKER2_HOST}:${REMOTE_WORKER2_DIR}/patches/hotfix-vllm-c128a-prefill-cache.py"
+  fi
   if [ "$ENABLE_VLLM_GB10_PATCH" = "1" ]; then
     tar -C "$VLLM_GB10_PATCH_DIR" \
       --exclude='*.egg-info' \
@@ -1513,6 +1682,17 @@ if [ "$DSPARK_WORKER_HF_NFS" = "1" ]; then
   fi
 fi
 validate_compose
+if [ "$VLLM_ENABLE_RESPONSES_API_STORE" = "1" ]; then
+  echo "Checking bounded Responses store compatibility on the worker before either rank starts..."
+  remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV $DSPARK_RESPONSES_STORE_REMOTE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-dsv4-responses-store.py --check"
+  if [ "$DSPARK_TP3" = "1" ]; then
+    echo "Checking bounded Responses store compatibility on worker2 before ranks start..."
+    remote_compose2 "NODE_RANK=2 HEADLESS=1 $WORKER2_HF_COMPOSE_ENV $DSPARK_RESPONSES_STORE_REMOTE_ENV VLLM_HOST_IP='$WORKER2_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER2_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-dsv4-responses-store.py --check"
+  fi
+  echo "Checking bounded Responses store compatibility on the head before either rank starts..."
+  compose_base 0 "" run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-dsv4-responses-store.py --check
+fi
+
 
 if [ "${DSPARK_SKIP_ISSUE117_RECHECK_HOTFIX:-0}" != "1" ]; then
   echo "Checking Issue #117 SHM ring compatibility on the worker before either rank starts..."
@@ -1532,12 +1712,91 @@ if [ "${DSPARK_ENABLE_ISSUE136_XGRAMMAR_HOTFIX:-0}" = "1" ]; then
   compose_base 0 "" run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-issue136-xgrammar-termination.py --check
 fi
 
+if [ "${DSPARK_ENABLE_ISSUE191_TOOLCALL_FAILCLOSED:-0}" = "1" ]; then
+  echo "Checking Issue #191 tool-call fail-closed compatibility on the worker before either rank starts..."
+  remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-issue191-toolcall-failclosed.py --check"
+  if [ "$DSPARK_TP3" = "1" ]; then
+    echo "Checking Issue #191 tool-call fail-closed compatibility on worker2 before ranks start..."
+    remote_compose2 "NODE_RANK=2 HEADLESS=1 $WORKER2_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER2_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER2_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-issue191-toolcall-failclosed.py --check"
+  fi
+  echo "Checking Issue #191 tool-call fail-closed compatibility on the head before either rank starts..."
+  compose_base 0 "" run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-issue191-toolcall-failclosed.py --check
+fi
+if [ "${DSPARK_ENABLE_DSPARK_BLOCK_K:-0}" = "1" ]; then
+  echo "Checking DSpark block-k unlock compatibility on the worker before either rank starts..."
+  remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-dspark-block-k.py --check"
+  if [ "$DSPARK_TP3" = "1" ]; then
+    echo "Checking DSpark block-k unlock compatibility on worker2 before ranks start..."
+    remote_compose2 "NODE_RANK=2 HEADLESS=1 $WORKER2_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER2_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER2_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-dspark-block-k.py --check"
+  fi
+  echo "Checking DSpark block-k unlock compatibility on the head before either rank starts..."
+  compose_base 0 "" run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-dspark-block-k.py --check
+fi
+if [ "${DSPARK_ENABLE_ROPE_SWA_FIX:-0}" = "1" ]; then
+  echo "Checking RoPE SWA fix compatibility on the worker before either rank starts..."
+  remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-rope-swa-fix.py --check"
+  if [ "$DSPARK_TP3" = "1" ]; then
+    echo "Checking RoPE SWA fix compatibility on worker2 before ranks start..."
+    remote_compose2 "NODE_RANK=2 HEADLESS=1 $WORKER2_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER2_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER2_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-rope-swa-fix.py --check"
+  fi
+  echo "Checking RoPE SWA fix compatibility on the head before either rank starts..."
+  compose_base 0 "" run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-rope-swa-fix.py --check
+fi
+if [ "${DSPARK_ENABLE_DSPARK_SWA_PREFIX:-0}" = "1" ]; then
+  echo "Checking DSpark SWA prefix compatibility on the worker before either rank starts..."
+  remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-dspark-swa-prefix.py --check"
+  if [ "$DSPARK_TP3" = "1" ]; then
+    echo "Checking DSpark SWA prefix compatibility on worker2 before ranks start..."
+    remote_compose2 "NODE_RANK=2 HEADLESS=1 $WORKER2_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER2_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER2_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-dspark-swa-prefix.py --check"
+  fi
+  echo "Checking DSpark SWA prefix compatibility on the head before either rank starts..."
+  compose_base 0 "" run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-dspark-swa-prefix.py --check
+fi
+if [ "${DSPARK_ENABLE_DSML_RECOVERY:-0}" = "1" ]; then
+  echo "Checking DSML recovery compatibility on the worker before either rank starts..."
+  remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-dsml-recovery.py --check"
+  if [ "$DSPARK_TP3" = "1" ]; then
+    echo "Checking DSML recovery compatibility on worker2 before ranks start..."
+    remote_compose2 "NODE_RANK=2 HEADLESS=1 $WORKER2_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER2_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER2_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-dsml-recovery.py --check"
+  fi
+  echo "Checking DSML recovery compatibility on the head before either rank starts..."
+  compose_base 0 "" run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-dsml-recovery.py --check
+fi
+if [ "${DSPARK_ENABLE_ISSUE144_EFFORT_ALIGN:-0}" = "1" ]; then
+  echo "Checking Issue #144 effort alignment compatibility on the worker before either rank starts..."
+  remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-dsv4-issue144-effort-align.py --check"
+  if [ "$DSPARK_TP3" = "1" ]; then
+    echo "Checking Issue #144 effort alignment compatibility on worker2 before ranks start..."
+    remote_compose2 "NODE_RANK=2 HEADLESS=1 $WORKER2_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER2_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER2_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-dsv4-issue144-effort-align.py --check"
+  fi
+  echo "Checking Issue #144 effort alignment compatibility on the head before either rank starts..."
+  compose_base 0 "" run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-dsv4-issue144-effort-align.py --check
+fi
+if [ "${DSPARK_ENABLE_MXFP4_INDEXER_CACHE:-0}" = "1" ]; then
+  echo "Checking MXFP4 indexer K cache compatibility on the worker before either rank starts..."
+  remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-mxfp4-indexer-cache.py --check"
+  if [ "$DSPARK_TP3" = "1" ]; then
+    echo "Checking MXFP4 indexer K cache compatibility on worker2 before ranks start..."
+    remote_compose2 "NODE_RANK=2 HEADLESS=1 $WORKER2_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER2_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER2_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-mxfp4-indexer-cache.py --check"
+  fi
+  echo "Checking MXFP4 indexer K cache compatibility on the head before either rank starts..."
+  compose_base 0 "" run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-mxfp4-indexer-cache.py --check
+fi
+if [ "${DSPARK_ENABLE_C128A_PREFILL_CACHE:-0}" = "1" ]; then
+  echo "Checking C128A prefill cache compatibility before either rank starts..."
+  remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-c128a-prefill-cache.py --check"
+  if [ "$DSPARK_TP3" = "1" ]; then
+    remote_compose2 "NODE_RANK=2 HEADLESS=1 $WORKER2_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER2_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER2_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-c128a-prefill-cache.py --check"
+  fi
+  compose_base 0 "" run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-c128a-prefill-cache.py --check
+fi
+
 echo "Starting DSpark worker on ${WORKER_HOST}..."
-remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' DSPARK_ENABLE_ISSUE141_SPARSE_MLA_CHUNK='$DSPARK_ISSUE141_EFFECTIVE' DSPARK_ISSUE141_HOTFIX='./patches/hotfix-dsv4-issue141-sparse-mla-decode-chunk.py' DSPARK_ENABLE_SP_INDEXER='$DSPARK_SP_INDEXER_EFFECTIVE' DSPARK_SP_INDEXER_HOTFIX='./patches/hotfix-dsv4-sp-indexer-prefill.py' DSPARK_ENABLE_DEEPGEMM_SM121_ALIAS='$DSPARK_DEEPGEMM_ALIAS_EFFECTIVE' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT='$DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT' DSPARK_ISSUE138_HOTFIX='./patches/hotfix-vllm-issue138-responses-history.py' DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT='$DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT' DSPARK_CODEX_AGENT_MESSAGE_HOTFIX='./patches/hotfix-vllm-codex-agent-message.py' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES up -d"
+remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV $DSPARK_RESPONSES_STORE_REMOTE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' DSPARK_ENABLE_ISSUE141_SPARSE_MLA_CHUNK='$DSPARK_ISSUE141_EFFECTIVE' DSPARK_ISSUE141_HOTFIX='./patches/hotfix-dsv4-issue141-sparse-mla-decode-chunk.py' DSPARK_ENABLE_SP_INDEXER='$DSPARK_SP_INDEXER_EFFECTIVE' DSPARK_SP_INDEXER_HOTFIX='./patches/hotfix-dsv4-sp-indexer-prefill.py' DSPARK_ENABLE_DEEPGEMM_SM121_ALIAS='$DSPARK_DEEPGEMM_ALIAS_EFFECTIVE' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT='$DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT' DSPARK_ISSUE138_HOTFIX='./patches/hotfix-vllm-issue138-responses-history.py' DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT='$DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT' DSPARK_CODEX_AGENT_MESSAGE_HOTFIX='./patches/hotfix-vllm-codex-agent-message.py' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES up -d"
 
 if [ "$DSPARK_TP3" = "1" ]; then
   echo "Starting DSpark worker2 on ${WORKER2_HOST}..."
-  remote_compose2 "NODE_RANK=2 HEADLESS=1 $WORKER2_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER2_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' DSPARK_ENABLE_ISSUE141_SPARSE_MLA_CHUNK='$DSPARK_ISSUE141_EFFECTIVE' DSPARK_ISSUE141_HOTFIX='./patches/hotfix-dsv4-issue141-sparse-mla-decode-chunk.py' DSPARK_ENABLE_SP_INDEXER='$DSPARK_SP_INDEXER_EFFECTIVE' DSPARK_SP_INDEXER_HOTFIX='./patches/hotfix-dsv4-sp-indexer-prefill.py' DSPARK_ENABLE_DEEPGEMM_SM121_ALIAS='$DSPARK_DEEPGEMM_ALIAS_EFFECTIVE' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT='$DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT' DSPARK_ISSUE138_HOTFIX='./patches/hotfix-vllm-issue138-responses-history.py' DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT='$DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT' DSPARK_CODEX_AGENT_MESSAGE_HOTFIX='./patches/hotfix-vllm-codex-agent-message.py' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER2_COMPOSE_FILES up -d"
+  remote_compose2 "NODE_RANK=2 HEADLESS=1 $WORKER2_HF_COMPOSE_ENV $DSPARK_RESPONSES_STORE_REMOTE_ENV VLLM_HOST_IP='$WORKER2_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' DSPARK_ENABLE_ISSUE141_SPARSE_MLA_CHUNK='$DSPARK_ISSUE141_EFFECTIVE' DSPARK_ISSUE141_HOTFIX='./patches/hotfix-dsv4-issue141-sparse-mla-decode-chunk.py' DSPARK_ENABLE_SP_INDEXER='$DSPARK_SP_INDEXER_EFFECTIVE' DSPARK_SP_INDEXER_HOTFIX='./patches/hotfix-dsv4-sp-indexer-prefill.py' DSPARK_ENABLE_DEEPGEMM_SM121_ALIAS='$DSPARK_DEEPGEMM_ALIAS_EFFECTIVE' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT='$DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT' DSPARK_ISSUE138_HOTFIX='./patches/hotfix-vllm-issue138-responses-history.py' DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT='$DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT' DSPARK_CODEX_AGENT_MESSAGE_HOTFIX='./patches/hotfix-vllm-codex-agent-message.py' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER2_COMPOSE_FILES up -d"
 fi
 
 echo "Starting DSpark head..."
