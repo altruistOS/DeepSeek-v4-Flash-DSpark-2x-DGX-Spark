@@ -21,12 +21,12 @@ jobs:
         run: docker pull dicksondickson/vllm_spark_dsv4:0.29-b12x
 
       - name: Retag for GHCR
-        run: docker tag dicksondickson/vllm_spark_dsv4:0.29-b12x ghcr.io/altruistOS/vllm_spark_dsv4:0.29-b12x
+        run: docker tag dicksondickson/vllm_spark_dsv4:0.29-b12x ghcr.io/altruistos/vllm_spark_dsv4:0.29-b12x
 
       - name: Push to GHCR
-        run: docker push ghcr.io/altruistOS/vllm_spark_dsv4:0.29-b12x
+        run: docker push ghcr.io/altruistos/vllm_spark_dsv4:0.29-b12x
 
       - name: Verify
         run: |
-          echo "Pushed ghcr.io/altruistOS/vllm_spark_dsv4:0.29-b12x"
+          echo "Pushed ghcr.io/altruistos/vllm_spark_dsv4:0.29-b12x"
           docker images | grep vllm_spark_dsv4 || true
