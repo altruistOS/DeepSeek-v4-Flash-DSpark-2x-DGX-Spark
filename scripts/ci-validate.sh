@@ -20,6 +20,7 @@ for f in \
   build-dspark-vllm-runtime.sh \
   files/nfs-share.sh \
   files/nfs-server/entrypoint.sh \
+  scripts/ab-boot.sh \
   smoke-deepseek-v4-flash-dspark.sh \
   status-deepseek-v4-flash-dspark.sh \
   logs-deepseek-v4-flash-dspark.sh \
@@ -31,8 +32,12 @@ for f in \
   scripts/boot-shape-warmup.sh \
   scripts/test-boot-shape-warmup.sh \
   scripts/validate_tp3.sh \
+  scripts/bench-patches.sh \
   lmcache/run-lmcache-server.sh \
+  scripts/bench-baseline-issue22-only.sh \
   scripts/test-lmcache-compose-gate.sh \
+  scripts/selftest-runtime-ablation.sh \
+  scripts/bench-baseline-no-patches.sh \
   patches/*.sh
 do
   [ -e "$f" ] || continue
@@ -70,6 +75,7 @@ py_files+=(
   scripts/test-redact-api-key-log.py
   scripts/test-hotfix-atomic-transaction.py
   scripts/test-python-hotfix-failclosed.py
+  scripts/test-gb10-install-failclosed.py
   scripts/test-dsv4-vision-exp-hotfix.py
   scripts/test-issue141-sparse-mla-decode-chunk.py
   scripts/test-issue136-xgrammar-termination.py
@@ -86,6 +92,8 @@ py_files+=(
   scripts/test-issue117-shm-ring-buffer.py
   scripts/verify-issue136-xgrammar-live.py
   scripts/test-empty-encoder-output-hotfix.py
+  scripts/test-runtime-ablation.py
+  scripts/selftest-runtime-ablation.py
   scripts/ruler-lite.py
   scripts/verify-dsv4-027-equality-gate.py
   scripts/ab-issue133-triton-specialization.py
@@ -103,6 +111,8 @@ python3 scripts/test-issue31-thinking-budget-gpu.py -q
 ok "test-issue31-thinking-budget-gpu"
 python3 scripts/test-issue55-tool-truncation.py -q
 ok "test-issue55-tool-truncation"
+python3 scripts/test-start-ssh-wrappers.py -q
+ok "test-start-ssh-wrappers"
 python3 scripts/test-responses-store-hotfix.py -q
 ok "test-responses-store-hotfix"
 python3 scripts/test-responses-api-live.py -q
@@ -125,26 +135,48 @@ python3 scripts/test-ruler-lite-pad.py -q
 ok "test-ruler-lite-pad"
 python3 scripts/test-numeric-knob-validation.py -q
 ok "test-numeric-knob-validation"
+python3 scripts/test-bench-patches-prompt.py -q
+ok "test-bench-patches-prompt"
 python3 scripts/test-env-normalisation.py -q
 ok "test-env-normalisation"
+python3 scripts/test-stop-name-filter.py -q
+ok "test-stop-name-filter"
 python3 scripts/test-served-model-alias.py -q
 ok "test-served-model-alias"
+python3 scripts/test-start-worker-stale-exit.py -q
+ok "test-start-worker-stale-exit"
 python3 scripts/test-dspark-api-keys.py -q
 ok "test-dspark-api-keys"
+python3 scripts/test-bench-baseline-hotfix-paths.py -q
+ok "test-bench-baseline-hotfix-paths"
 python3 scripts/test-redact-api-key-log.py -q
 ok "test-redact-api-key-log"
+python3 scripts/test-bench-baseline-lifecycle.py -q
+ok "test-bench-baseline-lifecycle"
 python3 scripts/test-hotfix-atomic-transaction.py -q
 ok "test-hotfix-atomic-transaction"
+python3 scripts/test-bench-baseline-patch-counters.py -q
+ok "test-bench-baseline-patch-counters"
 python3 scripts/test-python-hotfix-failclosed.py -q
 ok "test-python-hotfix-failclosed"
+python3 scripts/test-gb10-install-failclosed.py -q
+ok "test-gb10-install-failclosed"
+python3 scripts/test-status-logs-probes.py -q
+ok "test-status-logs-probes"
 python3 scripts/test-dsv4-vision-exp-hotfix.py -q
 ok "test-dsv4-vision-exp-hotfix"
+python3 scripts/test-ab-boot-sed-memgate.py -q
+ok "test-ab-boot-sed-memgate"
 python3 scripts/test-issue141-sparse-mla-decode-chunk.py -q
 ok "test-issue141-sparse-mla-decode-chunk"
 python3 scripts/test-issue136-xgrammar-termination.py -q
 ok "test-issue136-xgrammar-termination"
+python3 scripts/test-build-rsync-guard.py -q
+ok "test-build-rsync-guard"
 python3 scripts/test-issue191-toolcall-failclosed.py -q
 ok "test-issue191-toolcall-failclosed"
+python3 scripts/test-env-perms-open-bind.py -q
+ok "test-env-perms-open-bind"
 python3 scripts/test-dspark-block-k.py -q
 ok "test-dspark-block-k"
 python3 scripts/test-rope-swa-fix.py -q
@@ -163,6 +195,8 @@ python3 scripts/test-issue117-shm-ring-buffer.py -q
 ok "test-issue117-shm-ring-buffer"
 python3 scripts/test-empty-encoder-output-hotfix.py -q
 ok "test-empty-encoder-output-hotfix"
+python3 scripts/test-runtime-ablation.py -q
+ok "test-runtime-ablation"
 python3 tests/test_issue27_inflight_cap.py -q
 ok "test_issue27_inflight_cap"
 python3 tests/test_adaptive_prefill_chunk.py -q
@@ -452,6 +486,30 @@ else
   bad "start missing already-running exit 3 (#72)"
 fi
 
+# The ENVS.md -> PATCHES.md #136 anchor must match the actual heading slug.
+if grep -q 'issue-136--xgrammar-accepts-speculative-tokens-after-termination' docs/ENVS.md; then
+  bad "ENVS.md links the retired #136 anchor"
+elif ! grep -q 'issues-136--210--xgrammar-termination-and-post-reasoning-fsm-chain' docs/ENVS.md; then
+  bad "ENVS.md -> PATCHES.md #136+#210 anchor missing"
+elif grep -q '](vl-nvfp4-coexist-2026-08-11.md)' results/RESULTS-2026-08-14.md; then
+  bad "RESULTS links a file that is not in the repo"
+else
+  ok "no broken doc anchors/links"
+fi
+
+# Docs/ops lane facts must not regress to the retired 0731 lane.
+if grep -q 'deepseek-v4-flash-0731' AUDIT.md scripts/run-audit.sh smoke-deepseek-v4-flash-dspark.sh; then
+  bad "0731 served-model name returned in AUDIT.md / run-audit.sh / smoke script"
+elif ! grep -q 'SERVED_MODEL_NAME:-deepseek-v4-flash-vision-exp' smoke-deepseek-v4-flash-dspark.sh; then
+  bad "smoke script served-name fallback is not the Vision-Exp lane"
+elif grep -q '0731 hub snapshot' README.md; then
+  bad "README troubleshooting references the 0731 snapshot again"
+elif grep -q '36 rows (N=6, k=5)' .env.dspark.example; then
+  bad ".env.dspark.example again claims the shipped default is 36 rows (k=5)"
+else
+  ok "no stale 0731-lane facts in docs/ops surface"
+fi
+
 # Mounted hotfix files must exist.
 for p in \
   patches/hotfix-encoding-dsv4-issue21.py \
@@ -464,6 +522,7 @@ for p in \
   patches/hotfix-dsv4-replicate-markov-head.py \
   patches/hotfix-dsv4-issue133-triton-specialization.py \
   patches/hotfix-dsv4-issue141-sparse-mla-decode-chunk.py \
+  patches/hotfix-dsv4-runtime-ablation.py \
   patches/hotfix-vllm-empty-encoder-output.py \
   patches/hotfix-dsv4-vision-exp.py \
   patches/hotfix-vllm-issue136-xgrammar-termination.py \

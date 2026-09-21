@@ -77,8 +77,9 @@ Qwen3.8-Flash-vLLM).
    ```
 
    Use `--abliterated` or `--yes` (reads `ABLITERATED` from `.env.dspark`).
-   Abliterated weights are gated (`HF_TOKEN`). Prepare forces HF
-   online even if `HF_HUB_OFFLINE=1`, then you can serve offline.
+   Abliteration is gated (`HF_TOKEN`): agree on the Keys Hub repo, then
+   prepare downloads the 18 KiB direction — not the 157 GiB checkpoint.
+   Prepare forces HF online even if `HF_HUB_OFFLINE=1`, then you can serve offline.
    Default `DSPARK_WORKER_HF_NFS=0` also downloads onto the worker. After
    the cache is complete, keep `HF_HUB_OFFLINE=1`. See
    [Worker weights over NFS](#worker-weights-over-nfs-optional) to skip the
@@ -137,7 +138,7 @@ hosts or it can kill vLLM under deep-context load.
 | Context ceiling | `MAX_MODEL_LEN=1048576` (1M) |
 | Concurrent seqs | `MAX_NUM_SEQS=6` |
 | Batch tokens | `MAX_NUM_BATCHED_TOKENS=8192` |
-| KV | `nvfp4_ds_mla`, **17.04 GiB / 2,331,430 tokens** on this cluster (util 0.83; Vision-Exp ViT takes more weight RAM than 0731) |
+| KV | `nvfp4_ds_mla`, **17.04 GiB / 2,331,430 tokens** on this cluster (util 0.835; Vision-Exp ViT takes more weight RAM than 0731) |
 | Spec | `MTP_NUM_TOKENS=6` (≥ `dspark_block_size` 5 and divisible by Vision-Exp `n_predict=3`) |
 | Thinking | `DEFAULT_THINKING=low` (`off` / `low` / `high` / `max`) |
 | Graphs | `VLLM_USE_BREAKABLE_CUDAGRAPH=0` (keep this; unset is slower) |
@@ -174,7 +175,7 @@ cluster wiring, not product switches. Full Anemll vs Stage-C matrix:
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| **`ABLITERATED`** | `0` | **`0`** = official [`deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp) @ `DSPARK_REVISION`. **`1`** = [Keys abliterated](https://huggingface.co/drowzeys/keys-DeepSeekV4Flash-Vision-EXP-ablit). Start and prepare pick the HF id from this flag. Gated; `prepare --abliterated` needs `HF_TOKEN`. |
+| **`ABLITERATED`** | `0` | **`0`** = official [`deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp) @ `DSPARK_REVISION`, stock decoder. **`1`** = same official weights plus runtime refusal-direction projection. Does **not** download the 157 GiB [Keys checkpoint](https://huggingface.co/drowzeys/keys-DeepSeekV4Flash-Vision-EXP-ablit). You must agree to that repo's gated terms, then `prepare --abliterated` downloads `RESPONSIBLE_USE.md` plus the 18 KiB direction (`HF_TOKEN`). Recreate both ranks after flipping. Default `λ=3.5`, layers `10-42`. The direction was captured on 0731 FP8 DSpark; transfer onto Vision-Exp is experimental. |
 | `DSPARK_REVISION` | `86f746b36186f0e567729a5c06a8c918caba82a9` | Official Vision-Exp pin. Empty = tip of `main`. |
 | `DSPARK_REVISION_ABLITERATED` | empty | Abliterated pin. Empty = tip of that repo. |
 | `DSPARK_MODEL_OFFICIAL` / `DSPARK_MODEL_ABLITERATED` | the two HF ids above | Override only if you intentionally swap the repo id. Do not point this at the 0731 ablit dump — that drops `image_url`. |
@@ -329,7 +330,7 @@ On the **default Anemll 1M/6** stack:
 
 | **Three Sparks (TP=3, `./start-tp3.sh`, 16 slots)** | Decode ≈ +4–13 % per stream and **≈ 200 tok/s aggregate at 16 streams**; prefill 4–13 % slower to 64K and ≈ 22 % slower at 128K–256K (5.0 / 18.6 / 91 / 202 s TTFT at 8K / 32K / 128K / 256K vs 4.4 / 18.0 / 75 / 165 s on two nodes). See [Optional: three Sparks (TP=3)](#optional-three-sparks-tp3). |
 
-That ~170–190 c=6 number is **six streams generating**, not six huge prefills.
+That ~160–190 c=6 number is **six streams generating**, not six huge prefills.
 Live 2026-08-14 on this cluster: 256 × c=6 = **162** agg; 128K × c=1 still
 **75 tok/s** / **80 s** TTFT.
 
@@ -435,7 +436,21 @@ curl :8888/v1/chat/completions -H 'Content-Type: application/json' -d '{
 }'
 ```
 
-**pi** — the budget needs the boot flag **and** the pi model entry, so
+**pi image support** — [`pi-models.dspark.example.json`](pi-models.dspark.example.json)
+declares `"input": ["text", "image"]` for `deepseek-v4-flash-vision-exp`.
+The [pi model contract](https://github.com/badlogic/pi-mono/blob/d981de1229ef899957bbe968bc8dcda02a21f477/packages/coding-agent/docs/models.md#model-configuration)
+uses `input` to declare supported input types; `["text"]` is text-only.
+If you copied an older example to `~/.pi/agent/models.json`, add `"image"`
+to that model's `input` array without replacing your other settings.
+The [same revision's reload instructions](https://github.com/badlogic/pi-mono/blob/d981de1229ef899957bbe968bc8dcda02a21f477/packages/coding-agent/docs/models.md#full-example)
+say opening `/model` reloads the file without restarting pi; select the
+updated model before attaching an image. Other client versions may differ.
+Send screenshots on a **user** turn, following the server's image usage
+notes above, not as structured images on `system`, `assistant`, `tool`, or
+`function` turns. The example declaration alone does not verify screenshot
+delivery through a live pi session.
+
+**pi thinking budget** — the budget needs the boot flag **and** the pi model entry, so
 [`pi-models.dspark.example.json`](pi-models.dspark.example.json) ships
 `supportsThinkingTokenBudget: false` to match the server default
 (`DSPARK_ENABLE_ISSUE31_GPU_HOTFIX=0`). Copy it to `~/.pi/agent/models.json`;
@@ -470,7 +485,7 @@ yet supported by the V2 model runner` — so keep the capability `false` unless
 
 | Knob | Meaning | This build |
 | --- | --- | --- |
-| KV pool | Shared blocks after weights load | 2,331,430 tokens / 17.04 GiB @ util 0.83 |
+| KV pool | Shared blocks after weights load | 2,331,430 tokens / 17.04 GiB @ util 0.835 |
 | `max_model_len` | Per-request **ceiling** | 1,048,576 |
 | `max_num_seqs` | Max **active** sequences | 6 |
 
@@ -492,7 +507,7 @@ Validate **direct** `:8888` first, then the agent harness.
 
 1. Same image digest on both nodes (`docker image inspect $DSPARK_VLLM_IMAGE`).
    Compose must use `/usr/local/bin/vllm` (Anemll), not Stage-C `/opt/env`.
-2. Full 0731 hub snapshot on **head and worker**, including
+2. Full Vision-Exp hub snapshot on **head and worker**, including
    `encoding/encoding_dsv4.py`.
 3. Send `temperature: 0` for deterministic curls. Clear harness fallback lists
    so another model cannot poison the transcript.
@@ -686,7 +701,7 @@ Full list: [`CREDITS.md`](CREDITS.md).
 patch, ragged `query_start_loc`, `nvfp4_ds_mla` wiring.
 
 **[@u1tra_instinct](https://x.com/u1tra_instinct)** — abliterated Vision-Exp
-weights (`ABLITERATED=1`), from the original repo
+path (`ABLITERATED=1`), gated on
 [`drowzeys/keys-DeepSeekV4Flash-Vision-EXP-ablit`](https://huggingface.co/drowzeys/keys-DeepSeekV4Flash-Vision-EXP-ablit).
 
 Also: [tonyd2wild](https://github.com/tonyd2wild/), Rafael Caricio, Fraser Price,
