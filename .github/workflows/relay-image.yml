@@ -1,0 +1,32 @@
+name: Relay image to GHCR
+
+on:
+  workflow_dispatch:
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull upstream Docker Hub image
+        run: docker pull dicksondickson/vllm_spark_dsv4:0.29-b12x
+
+      - name: Retag for GHCR
+        run: docker tag dicksondickson/vllm_spark_dsv4:0.29-b12x ghcr.io/altruistos/vllm_spark_dsv4:0.29-b12x
+
+      - name: Push to GHCR
+        run: docker push ghcr.io/altruistos/vllm_spark_dsv4:0.29-b12x
+
+      - name: Verify
+        run: |
+          echo "Pushed ghcr.io/altruistos/vllm_spark_dsv4:0.29-b12x"
+          docker images | grep vllm_spark_dsv4 || true
